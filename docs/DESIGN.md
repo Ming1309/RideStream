@@ -155,3 +155,125 @@ Dữ liệu được Apache Airflow kéo về từ OpenWeatherMap API mỗi 10 p
 ## ETL Tools
 + Các công cụ sử dụng cho quá trình ETL
 ![tools](./RideStream-etl-tools.drawio.png)
+
+## D. Kiến trúc Backend API (Application Layer)
+
+Backend Node.js đóng vai trò là **cầu nối** giữa Data Pipeline và người dùng cuối (đội ngũ vận hành). Spark sau khi xử lý dữ liệu sẽ ghi kết quả vào **PostgreSQL (các bảng processed)**. Backend sử dụng cơ chế **PostgreSQL LISTEN/NOTIFY** để nhận sự kiện thời gian thực và đẩy xuống Frontend qua **Socket.io**.
+
+### 1. Luồng dữ liệu Real-time
+
+```
+Spark xử lý xong ──→ INSERT/UPDATE vào PostgreSQL (bảng processed)
+                                    ↓
+                        Database Trigger kích hoạt
+                                    ↓
+                        pg_notify('channel', payload)
+                                    ↓
+                    Node.js pg client (LISTEN) nhận event
+                                    ↓
+                    Socket.io Server emit event
+                                    ↓
+                    React (socket.io-client) nhận và cập nhật UI
+```
+
+### 2. PostgreSQL Triggers & NOTIFY Channels
+
+Khi Spark ghi dữ liệu đã xử lý vào PostgreSQL, các **trigger** sẽ tự động phát sự kiện qua NOTIFY:
+
+| Bảng PostgreSQL (processed) | NOTIFY Channel | Mô tả | Trigger khi |
+| :--- | :--- | :--- | :--- |
+| `processed_rides` | `new_ride` | Cuốc xe đã xử lý (đã gán quận, khung giờ) | INSERT |
+| `processed_rides` | `ride_status_changed` | Cuốc xe thay đổi trạng thái | UPDATE trên cột `status` |
+| `surge_alerts` | `surge_alert` | Cảnh báo tăng giá theo khu vực | INSERT |
+| `fraud_alerts` | `fraud_alert` | Phát hiện hành vi gian lận | INSERT |
+| `weather_data` | `weather_update` | Dữ liệu thời tiết mới | INSERT |
+
+**Ví dụ trigger:**
+
+```sql
+CREATE OR REPLACE FUNCTION notify_new_ride()
+RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify('new_ride', row_to_json(NEW)::text);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER ride_inserted
+AFTER INSERT ON processed_rides
+FOR EACH ROW EXECUTE FUNCTION notify_new_ride();
+```
+
+### 3. REST API Endpoints (dự kiến)
+
+API đọc dữ liệu từ 2 nguồn: **PostgreSQL** (dữ liệu real-time và trong ngày) và **BigQuery** (thống kê lịch sử theo tuần/tháng/quý).
+
+**Authentication:**
+- `POST /api/auth/login` — Đăng nhập (JWT)
+- `POST /api/auth/register` — Đăng ký tài khoản admin
+
+**Rides (processed_rides):**
+- `GET /api/rides` — Danh sách cuốc xe đã xử lý (có phân trang, filter theo quận/trạng thái/khung giờ)
+- `GET /api/rides/:id` — Chi tiết cuốc xe
+
+**Analytics (PostgreSQL aggregate queries):**
+- `GET /api/analytics/overview` — Tổng quan KPI (tổng cuốc, doanh thu, tỷ lệ hủy)
+- `GET /api/analytics/by-district` — Thống kê theo quận
+- `GET /api/analytics/by-weather` — Phân tích tác động thời tiết
+- `GET /api/analytics/congestion` — Chỉ số kẹt xe theo khu vực
+
+**Alerts (surge_alerts, fraud_alerts) — PostgreSQL:**
+- `GET /api/alerts/surge` — Danh sách cảnh báo surge gần nhất
+- `GET /api/alerts/fraud` — Danh sách cảnh báo fraud gần nhất
+
+**Reports (BigQuery — thống kê lịch sử):**
+- `GET /api/reports/weekly` — Báo cáo tổng hợp theo tuần (doanh thu, số cuốc, tỷ lệ hủy)
+- `GET /api/reports/monthly` — Báo cáo tổng hợp theo tháng
+- `GET /api/reports/trends` — Biểu đồ xu hướng doanh thu / nhu cầu theo thời gian
+- `GET /api/reports/weather-impact` — Phân tích tác động thời tiết lên doanh thu theo tháng
+
+### 4. Socket.io Events
+
+| Event | Hướng | NOTIFY Channel nguồn | Mô tả |
+| :--- | :--- | :--- | :--- |
+| `ride:new` | Server → Client | `new_ride` | Cuốc xe mới đã xử lý |
+| `ride:status_changed` | Server → Client | `ride_status_changed` | Trạng thái cuốc xe thay đổi |
+| `alert:surge` | Server → Client | `surge_alert` | Cảnh báo surge pricing |
+| `alert:fraud` | Server → Client | `fraud_alert` | Cảnh báo phát hiện gian lận |
+| `weather:update` | Server → Client | `weather_update` | Cập nhật thời tiết mới |
+
+### 5. Tech Stack Backend
+
+- **Runtime:** Node.js
+- **Framework:** Express hoặc Fastify
+- **Authentication:** JWT (`jsonwebtoken`, `bcrypt`)
+- **Database:** `pg` (PostgreSQL client, dùng cho LISTEN/NOTIFY) + Prisma (ORM cho REST API)
+- **Data Warehouse:** `@google-cloud/bigquery` (thống kê tuần/tháng/quý)
+- **Real-time:** `Socket.io` (WebSocket server)
+- **Validation:** `Joi` hoặc `Zod`
+- **Container:** Docker
+
+## E. Kiến trúc Frontend Dashboard
+
+Frontend React đóng vai trò là giao diện trực quan cho đội ngũ vận hành, nhận dữ liệu từ Backend API qua 2 kênh: **REST API** (dữ liệu phân tích, lịch sử) và **Socket.io** (dữ liệu real-time từ PostgreSQL LISTEN/NOTIFY).
+
+### 1. Các trang chính
+
+| Trang | Mô tả | Nguồn dữ liệu |
+| :--- | :--- | :--- |
+| **Login** | Đăng nhập admin | REST API (Auth) |
+| **Overview Dashboard** | Tổng quan KPI + bản đồ nhiệt + live feed cuốc xe | Socket.io (`ride:new`) + REST API |
+| **Surge Alerts** | Bảng cảnh báo tăng giá theo khu vực, thời gian thực | Socket.io (`alert:surge`) + REST API |
+| **Fraud Detection** | Danh sách cuốc xe bị gắn cờ bất thường | Socket.io (`alert:fraud`) + REST API |
+| **Analytics** | Biểu đồ phân tích theo quận, thời tiết, khung giờ | REST API |
+| **Reports** | Xuất báo cáo, so sánh giai đoạn | REST API |
+
+### 2. Tech Stack Frontend
+
+- **Framework:** React (Vite)
+- **Bản đồ:** Leaflet / React-Leaflet
+- **Biểu đồ:** Recharts hoặc Chart.js
+- **Real-time Client:** `socket.io-client`
+- **HTTP Client:** Axios
+- **State Management:** React Context hoặc Zustand
+- **Styling:** CSS Modules hoặc Styled Components
