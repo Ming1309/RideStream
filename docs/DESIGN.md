@@ -152,9 +152,19 @@ Dữ liệu được Apache Airflow kéo về từ OpenWeatherMap API mỗi 10 p
 - **Phát hiện GPS Spoofing / Route Deviation:** Nhận diện các cuốc xe có trạng thái `ongoing` nhưng tọa độ (`lat/lon`) không thay đổi hoặc có vận tốc di chuyển bất khả thi (ví dụ: > 150km/h trong nội thành).
 - **Kiểm soát lạm dụng khuyến mãi (Promo Abuse):** Theo dõi các hành vi bất thường như một thiết bị đặt và hủy cuốc liên tục, hoặc cuốc xe diễn ra với quãng đường cực kỳ ngắn (dưới 100m) nhưng vẫn ghi nhận trạng thái `completed`.
 - **Cảnh báo tính khả dụng của dữ liệu (Data Latency / SLA Monitoring):** Theo dõi độ trễ luồng truyền dữ liệu bằng cách so sánh thời gian thay đổi trạng thái gốc (`updated_at`) và thời gian dữ liệu đáp vào Kafka/Spark, đảm bảo đảm bảo tính thời gian thực (ví dụ: < 5 giây).
-## ETL Tools
+## Luồng dữ liệu & Công cụ ETL (Data Flow & ETL Tools)
+
+### 1. Luồng dữ liệu tổng thể (Data Flow Diagram)
+
+Biểu đồ dưới đây mô tả trực quan chiều di chuyển của dữ liệu qua các thành phần trong hệ thống từ khi sinh ra cho đến khi hiển thị lên bảng điều khiển:
+
+![DataFlow](RideStream-db-DataFlow.drawio.png)
+
+### 2. Các công cụ sử dụng cho quá trình ETL 
+
 + Các công cụ sử dụng cho quá trình ETL
-![tools](./RideStream-etl-tools.drawio.png)
+
+![tools](RideStream-db-Tools.drawio.png)
 
 ## D. Kiến trúc Backend API (Application Layer)
 
