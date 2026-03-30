@@ -190,13 +190,13 @@ Spark xử lý xong ──→ INSERT/UPDATE vào PostgreSQL (bảng processed)
 
 Khi Spark ghi dữ liệu đã xử lý vào PostgreSQL, các **trigger** sẽ tự động phát sự kiện qua NOTIFY:
 
-| Bảng PostgreSQL (processed) | NOTIFY Channel | Mô tả | Trigger khi |
-| :--- | :--- | :--- | :--- |
-| `processed_rides` | `new_ride` | Cuốc xe đã xử lý (đã gán quận, khung giờ) | INSERT |
-| `processed_rides` | `ride_status_changed` | Cuốc xe thay đổi trạng thái | UPDATE trên cột `status` |
-| `surge_alerts` | `surge_alert` | Cảnh báo tăng giá theo khu vực | INSERT |
-| `fraud_alerts` | `fraud_alert` | Phát hiện hành vi gian lận | INSERT |
-| `weather_data` | `weather_update` | Dữ liệu thời tiết mới | INSERT |
+| Bảng PostgreSQL (processed)   | NOTIFY Channel        | Mô tả                                            | Trigger khi               |
+| :---------------------------- | :-------------------- | :------------------------------------------------- | :------------------------ |
+| `processed_rides`             | `new_ride`            | Cuốc xe đã xử lý (đã gán quận, khung giờ)              | INSERT                    |
+| `processed_rides`             | `ride_status_changed` | Cuốc xe thay đổi trạng thái                           | UPDATE trên cột `status`  |
+| `live_district_metrics`       | `surge_alert`         | Cảnh báo tăng giá theo khu vực                       | INSERT / UPDATE           |
+| `live_system_kpis`            | `kpi_update`          | Cập nhật KPI toàn hệ thống                           | INSERT / UPDATE           |
+| `live_weather_snapshot`       | `weather_update`      | Snapshot thời tiết mới từ Spark (nguồn: Airflow API) | INSERT                    |
 
 **Ví dụ trigger:**
 
@@ -244,13 +244,14 @@ API đọc dữ liệu từ 2 nguồn: **PostgreSQL** (dữ liệu real-time và
 
 ### 4. Socket.io Events
 
-| Event | Hướng | NOTIFY Channel nguồn | Mô tả |
-| :--- | :--- | :--- | :--- |
-| `ride:new` | Server → Client | `new_ride` | Cuốc xe mới đã xử lý |
-| `ride:status_changed` | Server → Client | `ride_status_changed` | Trạng thái cuốc xe thay đổi |
-| `alert:surge` | Server → Client | `surge_alert` | Cảnh báo surge pricing |
-| `alert:fraud` | Server → Client | `fraud_alert` | Cảnh báo phát hiện gian lận |
-| `weather:update` | Server → Client | `weather_update` | Cập nhật thời tiết mới |
+| Event                 | Hướng          | NOTIFY Channel nguồn   | Bảng nguồn                  | Mô tả                                 |
+| :-------------------- | :------------- | :--------------------- | :--------------------------- | :-------------------------------------- |
+| `ride:new`            | Server → Client | `new_ride`             | `processed_rides`            | Cuốc xe mới đã xử lý                     |
+| `ride:status_changed` | Server → Client | `ride_status_changed`  | `processed_rides`            | Trạng thái cuốc xe thay đổi              |
+| `alert:surge`         | Server → Client | `surge_alert`          | `live_district_metrics`      | Cảnh báo surge pricing                 |
+| `kpi:update`          | Server → Client | `kpi_update`           | `live_system_kpis`           | Cập nhật KPI toàn hệ thống             |
+| `alert:fraud`         | Server → Client | `fraud_alert`          | `fraud_alerts`               | Cảnh báo phát hiện gian lận            |
+| `weather:update`      | Server → Client | `weather_update`       | `live_weather_snapshot`      | Snapshot thời tiết mới nhất từ Spark  |
 
 ### 5. Tech Stack Backend
 

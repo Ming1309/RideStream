@@ -3,7 +3,7 @@
 > **Hệ thống:** RideStream — Real-time CDC & Analytics Platform  
 > **Loại CSDL:** PostgreSQL (OLTP + PostGIS)  
 > **Phiên bản tài liệu:** 1.0  
-> **Cập nhật lần cuối:** 2026-03-21
+> **Cập nhật lần cuối:** 2026-03-30
 
 ---
 
@@ -11,10 +11,10 @@
 
 Cơ sở dữ liệu PostgreSQL của RideStream gồm hai nhóm bảng chính:
 
-| Nhóm                     | Mục đích                                                 | Bảng                                                                    |
-| :----------------------- | :------------------------------------------------------- | :---------------------------------------------------------------------- |
-| **OLTP (Vận hành)**      | Lưu trữ dữ liệu giao dịch thô, là nguồn cho Debezium CDC | `users`, `drivers`, `vehicles`, `rides`, `rides_status_log`, `payments` |
-| **Processed (Đã xử lý)** | Dữ liệu Spark đã xử lý, dùng cho Backend API và NOTIFY   | `live_district_metrics`, `live_system_kpis`                             |
+| Nhóm                     | Mục đích                                                 | Bảng                                                                                          |
+| :----------------------- | :------------------------------------------------------- | :-------------------------------------------------------------------------------------------- |
+| **OLTP (Vận hành)**      | Lưu trữ dữ liệu giao dịch thô, là nguồn cho Debezium CDC | `users`, `drivers`, `vehicles`, `rides`, `rides_status_log`, `payments`                       |
+| **Processed (Đã xử lý)** | Dữ liệu Spark đã xử lý, dùng cho Backend API và NOTIFY   | `live_district_metrics`, `live_system_kpis`, `live_weather_snapshot`                          |
 
 ### Sơ đồ thiết kế 
 
@@ -157,7 +157,26 @@ requested ──→ accepted ──→ ongoing ──→ completed
 
 ---
 
-## 9. Quan hệ giữa các bảng (Relationships)
+## 9. Bảng `live_weather_snapshot` — Snapshot Thời tiết Thời gian thực
+
+**Ý nghĩa:** Bảng Processed — do Spark Streaming ghi sau khi xử lý luồng thời tiết từ Kafka (nguồn: Airflow → OpenWeatherMap API). Lưu mỗi snapshot thời tiết mới nhất nhận được, phục vụ Join với luồng cuốc xe để tính Surge Pricing và hiển thị điều kiện thời tiết hiện tại lên Dashboard. Không thay thế `dim_weather` ở DWH — đây là bảng **operational** phục vụ real-time.
+
+| Tên trường            | Kiểu dữ liệu   | Ràng buộc               | Ý nghĩa                                                                                                                                 |
+| :-------------------- | :------------- | :---------------------- | :-------------------------------------------------------------------------------------------------------------------------------------- |
+| `snapshot_id`         | `SERIAL`       | **PK**, NOT NULL        | Mã định danh tự tăng của snapshot thời tiết.                                                                                            |
+| `weather_condition`   | `VARCHAR(30)`  | NOT NULL                | Trạng thái thời tiết chính. Giá trị: `Clear` \| `Clouds` \| `Rain` \| `Thunderstorm` \| `Drizzle` \| `Haze`.                            |
+| `temperature_celsius` | `NUMERIC(5,2)` | NOT NULL                | Nhiệt độ thực đo (°C) tại thời điểm snapshot.                                                                                           |
+| `rain_volume_1h`      | `NUMERIC(6,2)` | NULLABLE                | Lượng mưa tích lũy trong 1 giờ qua (mm). `NULL` nếu không có mưa. Ngưỡng > 20mm kích hoạt Surge Pricing Alert.                         |
+| `updated_at`          | `TIMESTAMPTZ`  | NOT NULL, DEFAULT NOW() | Thời điểm Spark ghi snapshot này — tương ứng với timestamp trong payload API. Dùng để Watermark join với luồng cuốc xe.                  |
+
+**Ghi chú vận hành:**
+- Bảng này được Spark INSERT thêm dòng mới mỗi 10 phút (theo chu kỳ DAG Airflow).
+- Backend/Spark đọc dòng mới nhất (`ORDER BY updated_at DESC LIMIT 1`) để lấy điều kiện thời tiết hiện tại.
+- Khi INSERT, trigger `pg_notify('weather_update', ...)` sẽ thông báo cho Backend đẩy update xuống Frontend.
+
+---
+
+## 10. Quan hệ giữa các bảng (Relationships)
 
 | From | Cardinality | To | Mô tả |
 | :--- | :---: | :--- | :--- |
@@ -167,10 +186,11 @@ requested ──→ accepted ──→ ongoing ──→ completed
 | `vehicles` | 1 : N | `rides` | Một phương tiện có thể được dùng cho nhiều cuốc xe |
 | `rides` | 1 : N | `rides_status_log` | Một cuốc xe có nhiều bản ghi lịch sử trạng thái |
 | `rides` | 1 : 1 | `payments` | Mỗi cuốc xe (hoàn thành) có đúng một bản ghi thanh toán |
+| `live_weather_snapshot` | Độc lập | *(Spark join)* | Không có FK trực tiếp; Spark join theo `updated_at` Watermark với luồng cuốc xe |
 
 ---
 
-## 10. Chiến lược Indexing
+## 11. Chiến lược Indexing
 
 | Bảng | Cột được Index | Loại Index | Lý do |
 | :--- | :--- | :--- | :--- |
@@ -180,10 +200,11 @@ requested ──→ accepted ──→ ongoing ──→ completed
 | `rides` | `pickup_location`, `dropoff_location` | GiST (PostGIS) | Không gian — xác định cuốc xe theo quận, tìm hotspot |
 | `rides_status_log` | `ride_id`, `change_at` | B-tree | Lịch sử trạng thái theo cuốc xe và thời gian |
 | `live_district_metrics` | `updated_at` | B-tree | Kiểm tra freshness dữ liệu |
+| `live_weather_snapshot` | `updated_at` | B-tree | Lấy snapshot mới nhất và Watermark join |
 
 ---
 
-## 11. PostgreSQL Triggers & NOTIFY Channels
+## 12. PostgreSQL Triggers & NOTIFY Channels
 
 Khi Spark ghi dữ liệu vào các bảng **Processed**, các trigger PostgreSQL tự động gửi sự kiện qua `pg_notify` để Backend Node.js lắng nghe và đẩy xuống Frontend qua Socket.io.
 
@@ -193,10 +214,11 @@ Khi Spark ghi dữ liệu vào các bảng **Processed**, các trigger PostgreSQ
 | `rides`                 | UPDATE (cột `status`) | `ride_status_changed` | `ride:status_changed` | Trạng thái cuốc xe thay đổi    |
 | `live_district_metrics` | INSERT / UPDATE       | `surge_alert`         | `alert:surge`         | Cập nhật hệ số surge theo quận |
 | `live_system_kpis`      | INSERT / UPDATE       | `kpi_update`          | `kpi:update`          | Cập nhật KPI toàn hệ thống     |
+| `live_weather_snapshot` | INSERT                | `weather_update`      | `weather:update`      | Snapshot thời tiết mới từ Spark |
 
 ---
 
-## 12. Ghi chú về Kiểu dữ liệu địa lý (PostGIS)
+## 13. Ghi chú về Kiểu dữ liệu địa lý (PostGIS)
 
 Các trường tọa độ trong bảng `rides` sử dụng kiểu `GEOMETRY` của extension **PostGIS**:
 
